@@ -1,4 +1,3 @@
-// server.js - Enhanced version using SerpAPI data more effectively
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -13,6 +12,10 @@ const upload = multer({ storage: multer.memoryStorage() });
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// API key 
+// const SERPAPI_KEY = process.env.SERPAPI_KEY; 
+const SERPAPI_KEY ='2bd6055e24b0ab4236ba466cdad4a5db0a9cd545b5ac954cd4e7b982aefc5e6c';
 
 // Regex patterns
 const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
@@ -362,31 +365,40 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
 
 app.post('/api/scrape-realtor', async (req, res) => {
   try {
-    const { realtor, apiKey } = req.body;
+    console.log('Received scrape request:', req.body); // ADD THIS LINE
     
-    if (!apiKey) {
-      return res.status(400).json({ error: 'API key is required' });
+    const { realtor } = req.body;
+
+    if (!SERPAPI_KEY) {
+      console.error('SERPAPI_KEY not found!'); // ADD THIS LINE
+      return res.status(500).json({ error: 'Server API key not configured' });
     }
+
+    const apiKey = SERPAPI_KEY;
+    console.log('Using API key:', apiKey.substring(0, 10) + '...'); // ADD THIS LINE
     
     if (!realtor) {
       return res.status(400).json({ error: 'Realtor data is required' });
     }
     
+    console.log('Processing realtor:', realtor); // ADD THIS LINE
     const result = await processRealtor(realtor, apiKey);
+    console.log('Result:', result); // ADD THIS LINE
     res.json(result);
   } catch (error) {
+    console.error('Scrape endpoint error:', error); // ADD THIS LINE
     res.status(500).json({ error: error.message });
   }
 });
 
 app.post('/api/scrape-batch', upload.single('file'), async (req, res) => {
   try {
-    const { apiKey } = req.body;
-    
-    if (!apiKey) {
-      return res.status(400).json({ error: 'API key is required' });
+    if (!SERPAPI_KEY) {
+      return res.status(500).json({ error: 'Server API key not configured' });
     }
-    
+
+    const apiKey = SERPAPI_KEY;
+        
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }

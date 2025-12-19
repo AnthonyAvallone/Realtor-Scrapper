@@ -11,6 +11,7 @@ const RealtorScraper = () => {
   const [logs, setLogs] = useState([]);
   const [apiKey, setApiKey] = useState('');
   const [completed, setCompleted] = useState(false);
+  
 
   const API_BASE_URL = 'http://localhost:3001/api';
 
