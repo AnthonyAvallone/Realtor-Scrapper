@@ -15,8 +15,8 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [completed, setCompleted] = useState(false);
 
-  // const API_BASE_URL = 'http://167.71.81.58/api/realtors/'; 
-const API_BASE_URL = 'http://localhost:3001/api';
+  // const API_BASE_URL = 'http://localhost:3001/api';
+  const API_BASE_URL = 'http://167.71.81.58/api/realtors/';
 
   const addLog = (message, type = 'info') => {
     setLogs(prev => [...prev, { message, type, time: new Date().toLocaleTimeString() }]);
@@ -70,7 +70,12 @@ const API_BASE_URL = 'http://localhost:3001/api';
           realtor: {
             firstName: realtor.firstName,
             lastName: realtor.lastName,
-            company: realtor.company
+            company: realtor.company,
+            companyAddress: realtor.companyAddress,
+            primaryZip: realtor.primaryZip,
+            primaryCity: realtor.primaryCity,
+            primaryStateCode: realtor.primaryStateCode,
+            tags: realtor.tags
           }
         })
       });
@@ -135,24 +140,40 @@ const API_BASE_URL = 'http://localhost:3001/api';
     addLog('Scraping completed!', 'success');
   };
 
-  const downloadCSV = () => {
-    const headers = ['First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Source'];
-    const rows = allData.map(r => [
-      r.firstName, r.lastName, r.company, r.email, r.phone, r.source
-    ]);
+const downloadCSV = () => {
+  const headers = ['First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Source', 'Confidence', 'Company Address', 'Primary Zip', 'Primary City', 'Primary State Code', 'Tags'];
+  
+  const rows = allData.map(r => [
+    r.firstName || '', 
+    r.lastName || '', 
+    r.company || '', 
+    r.email || '', 
+    r.phone || '',  
+    r.source || '',
+    r.confidence || '',
+    r.companyAddress || '',
+    r.primaryZip || '',
+    r.primaryCity || '',
+    r.primaryStateCode || '',
+    r.tags || ''
+  ]);
 
-    const csv = [headers, ...rows]
-      .map(row => row.map(cell => `"${cell}"`).join(','))
-      .join('\n');
+  const csv = [headers, ...rows]
+    .map(row => row.map(cell => {
+      const cellStr = String(cell || '').replace(/"/g, '""');
+      return `"${cellStr}"`;
+    }).join(','))
+    .join('\n');
 
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'realtors_with_contacts.csv';
-    a.click();
-    window.URL.revokeObjectURL(url);
-  };
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'realtors_with_contacts.csv';
+  a.click();
+  window.URL.revokeObjectURL(url);
+};
+
 
   return (
     <div className="min-h-screen ">

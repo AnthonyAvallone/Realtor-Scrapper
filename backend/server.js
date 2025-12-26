@@ -44,6 +44,12 @@ function extractContactInfo(text) {
   };
 }
 
+function cleanPhoneNumber(phone) {
+  if (!phone) return '';
+  // Remove all non-numeric characters
+  return phone.replace(/\D/g, '');
+}
+
 function calculateConfidence(email, phone, source) {
   let score = 0;
   if (email) score += 50;
@@ -54,13 +60,13 @@ function calculateConfidence(email, phone, source) {
   return Math.min(score, 100);
 }
 
-// Enhanced SerpAPI search with multiple result types
+
 async function searchSerpApiEnhanced(query, apiKey) {
   try {
     const response = await axios.get('https://serpapi.com/search.json', {
       params: {
         q: query,
-        num: 20, // Get more results
+        num: 20, 
         api_key: apiKey,
         hl: 'en',
         gl: 'us'
@@ -83,7 +89,7 @@ async function searchSerpApiEnhanced(query, apiKey) {
       }
     }
     
-    // Extract from knowledge graph (often has contact info)
+
     if (data.knowledge_graph) {
       const kg = data.knowledge_graph;
       let kgText = [
@@ -187,7 +193,7 @@ async function tryScrapeSafe(url) {
 async function processRealtor(realtorData, apiKey) {
   const { firstName, lastName, company } = realtorData;
   
-  // Try multiple search strategies
+  // multiple search strategies
   const queries = [
     `${firstName} ${lastName} ${company} email phone contact`,
     `${firstName} ${lastName} ${company} email cell contact`,
@@ -264,11 +270,16 @@ async function processRealtor(realtorData, apiKey) {
       lastName,
       company,
       email,
-      phone,
+      phone: cleanPhoneNumber(phone),
       alternativeEmails: uniqueEmails.slice(1, 3),
-      alternativePhones: uniquePhones.slice(1, 3),
+      alternativePhones: uniquePhones.slice(1, 3).map(cleanPhoneNumber),
       source,
-      confidence
+      confidence,
+      companyAddress: realtorData.companyAddress || '',
+      primaryZip: realtorData.primaryZip || '',
+      primaryCity: realtorData.primaryCity || '',
+      primaryStateCode: realtorData.primaryStateCode || '',
+      tags: realtorData.tags || ''
     };
   } catch (error) {
     console.error(`Error processing ${firstName} ${lastName}:`, error.message);
@@ -281,8 +292,14 @@ async function processRealtor(realtorData, apiKey) {
       alternativeEmails: [],
       alternativePhones: [],
       source: '',
-      confidence: 0
+      confidence: 0,
+      companyAddress: realtorData.companyAddress || '',
+      primaryZip: realtorData.primaryZip || '',
+      primaryCity: realtorData.primaryCity || '',
+      primaryStateCode: realtorData.primaryStateCode || '',
+      tags: realtorData.tags || ''
     };
+
   }
 }
 
@@ -324,15 +341,27 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
           const company = (row[companyKey] || '').trim();
           const email = (row[emailKey] || '').trim();
           const phone = (row[phoneKey] || '').trim();
+          const county = row.primary_city || '';
+          const state = row.primary_state_code || '';
+          let generatedTags = 'realtor';
+
+          if (county && state) {
+            generatedTags = `"${county}, ${state} realtor""${state} realtor""realtor"`;
+          } else if (state) {
+            generatedTags = `"${state} realtor""realtor"`;
+          }
           
           const realtor = {
-            firstName,
-            lastName,
-            company,
-            email,
-            phone,
-            source: '',
-            confidence: 0
+            firstName: row.first_name || row.firstName,
+            lastName: row.last_name || row.lastName,
+            company: row.company,
+            email: row.email || '',
+            phone: row.phone || '',
+            companyAddress: row.company_address || '',
+            primaryZip: row.primary_zip || '',
+            primaryCity: row.primary_city || '',
+            primaryStateCode: row.primary_state_code || '',
+            tags: generatedTags
           };
           
           allRealtors.push(realtor);
@@ -365,28 +394,28 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
 
 app.post('/api/scrape-realtor', async (req, res) => {
   try {
-    console.log('Received scrape request:', req.body); // ADD THIS LINE
+    console.log('Received scrape request:', req.body); 
     
     const { realtor } = req.body;
 
     if (!SERPAPI_KEY) {
-      console.error('SERPAPI_KEY not found!'); // ADD THIS LINE
+      console.error('SERPAPI_KEY not found!'); 
       return res.status(500).json({ error: 'Server API key not configured' });
     }
 
     const apiKey = SERPAPI_KEY;
-    console.log('Using API key:', apiKey.substring(0, 10) + '...'); // ADD THIS LINE
+    console.log('Using API key:', apiKey.substring(0, 10) + '...'); 
     
     if (!realtor) {
       return res.status(400).json({ error: 'Realtor data is required' });
     }
     
-    console.log('Processing realtor:', realtor); // ADD THIS LINE
+    console.log('Processing realtor:', realtor); 
     const result = await processRealtor(realtor, apiKey);
-    console.log('Result:', result); // ADD THIS LINE
+    console.log('Result:', result); 
     res.json(result);
   } catch (error) {
-    console.error('Scrape endpoint error:', error); // ADD THIS LINE
+    console.error('Scrape endpoint error:', error); 
     res.status(500).json({ error: error.message });
   }
 });
@@ -467,7 +496,7 @@ app.post('/api/scrape-batch', upload.single('file'), async (req, res) => {
           confidence: scrapedData.confidence || 0
         };
         
-        // Delay between processing each realtor
+        // Delaying between processing each realtor
         await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
