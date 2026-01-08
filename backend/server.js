@@ -11,11 +11,13 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); 
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // API key 
-// const SERPAPI_KEY = process.env.SERPAPI_KEY; 
-const SERPAPI_KEY ='2bd6055e24b0ab4236ba466cdad4a5db0a9cd545b5ac954cd4e7b982aefc5e6c';
+const SERPAPI_KEY = process.env.SERPAPI_KEY; 
+// const SERPAPI_KEY ='2bd6055e24b0ab4236ba466cdad4a5db0a9cd545b5ac954cd4e7b982aefc5e6c';
+const N8N_WEBHOOK_URL = 'https://n8n.profitwithanthonyavallone.com/webhook/upload-realtors'
 
 // Regex patterns
 const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
@@ -42,6 +44,21 @@ function extractContactInfo(text) {
     emails: filteredEmails.slice(0, 5),
     phones: phones.slice(0, 5)
   };
+}
+
+function extractCountyFromFilename(filename) {
+  if (!filename) return '';
+  
+  const nameWithoutExt = filename.replace(/\.[^/.]+$/, '');
+
+
+  const countyMatch = nameWithoutExt.match(/([A-Za-z\s]+)\s*county/i);
+  
+  if (countyMatch && countyMatch[1]) {
+    return countyMatch[1].trim();
+  }
+  
+  return '';
 }
 
 function cleanPhoneNumber(phone) {
@@ -77,7 +94,6 @@ async function searchSerpApiEnhanced(query, apiKey) {
     const results = [];
     const data = response.data;
     
-    // Extract from organic results
     if (data.organic_results) {
       for (const result of data.organic_results) {
         results.push({
@@ -109,7 +125,7 @@ async function searchSerpApiEnhanced(query, apiKey) {
       });
     }
     
-    // Extract from local results (business listings)
+
     if (data.local_results && data.local_results.places) {
       for (const place of data.local_results.places) {
         const placeText = [
@@ -314,6 +330,10 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
     const needsScraping = [];
     const buffer = req.file.buffer.toString('utf-8');
     
+    // Extract county from filename
+    const countyFromFile = extractCountyFromFilename(req.file.originalname);
+    console.log('Extracted county from filename:', countyFromFile);
+    
     await new Promise((resolve, reject) => {
       Readable.from(buffer)
         .pipe(csv({ trim: true, skip_empty_lines: true }))
@@ -341,14 +361,15 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
           const company = (row[companyKey] || '').trim();
           const email = (row[emailKey] || '').trim();
           const phone = (row[phoneKey] || '').trim();
-          const county = row.primary_city || '';
+          const city = row.primary_city || '';
           const state = row.primary_state_code || '';
+          const county = countyFromFile; 
           let generatedTags = 'realtor';
 
           if (county && state) {
-            generatedTags = `"${county}, ${state} realtor""${state} realtor""realtor"`;
+            generatedTags = `${county} county ${state} realtor,${state} realtor,realtor`;
           } else if (state) {
-            generatedTags = `"${state} realtor""realtor"`;
+            generatedTags = `${state} realtor,realtor`;
           }
           
           const realtor = {
@@ -377,6 +398,8 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
     console.log(`Total realtors: ${allRealtors.length}`);
     console.log(`Need scraping: ${needsScraping.length}`);
     
+    const firstCity = allRealtors.length > 0 ? allRealtors[0].primaryCity : '';
+
     res.json({ 
       allRealtors,
       needsScraping,
@@ -384,7 +407,9 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
         total: allRealtors.length,
         needsScraping: needsScraping.length,
         hasComplete: allRealtors.length - needsScraping.length
-      }
+      },
+      county: countyFromFile,
+      city: firstCity
     });
   } catch (error) {
     console.error('Parse error:', error);
@@ -509,6 +534,73 @@ app.post('/api/scrape-batch', upload.single('file'), async (req, res) => {
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+app.post('/api/trigger-upload', async (req, res) => {
+  try {
+    const { csvContent, filename, stateCode, county, totalRealtors } = req.body;
+    
+    if (!csvContent || !filename || !stateCode) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    console.log(`Triggering n8n workflow for ${filename}`);
+    console.log(`State Code: ${stateCode}, County: ${county}`);
+    console.log(`Total realtors: ${totalRealtors || 'unknown'}`);
+    console.log(`CSV size: ${(csvContent.length / 1024).toFixed(2)} KB`);
+    
+    // Send to n8n webhook - only send CSV, not realtors array
+    const response = await axios.post(N8N_WEBHOOK_URL, {
+      csvContent,
+      filename,
+      stateCode,
+      county,
+      totalRealtors,
+      timestamp: new Date().toISOString()
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      timeout: 120000, // 2 minute timeout for large files
+      maxContentLength: 50 * 1024 * 1024, // 50MB
+      maxBodyLength: 50 * 1024 * 1024, // 50MB
+      validateStatus: function (status) {
+        return status >= 200 && status < 500;
+      }
+    });
+    
+    console.log('n8n response status:', response.status);
+    
+    if (response.headers['content-type']?.includes('text/html')) {
+      console.error('n8n returned HTML error page');
+      throw new Error('n8n webhook returned an error page. Check if workflow is active.');
+    }
+    
+    if (response.status >= 400) {
+      throw new Error(`n8n webhook failed with status ${response.status}`);
+    }
+    
+    console.log('n8n upload successful');
+    
+    res.json({ 
+      success: true, 
+      message: 'Upload triggered successfully',
+      n8nResponse: response.data 
+    });
+  } catch (error) {
+    console.error('n8n trigger error:', {
+      message: error.message,
+      url: N8N_WEBHOOK_URL,
+      code: error.code
+    });
+    
+    res.status(500).json({ 
+      error: error.message,
+      details: 'Failed to trigger n8n workflow',
+      webhookUrl: N8N_WEBHOOK_URL
+    });
+  }
 });
 
 const PORT = process.env.PORT || 3001;

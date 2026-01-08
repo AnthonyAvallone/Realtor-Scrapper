@@ -14,6 +14,8 @@ function App() {
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState([]);
   const [completed, setCompleted] = useState(false);
+  const [county, setCounty] = useState('');
+  const [city, setCity] = useState('');
 
   // const API_BASE_URL = 'http://localhost:3001/api';
   const API_BASE_URL = 'http://167.71.81.58/api/realtors/';
@@ -48,6 +50,8 @@ function App() {
       setAllData(result.allRealtors);
       setNeedsScrapingData(result.needsScraping);
       setStats(result.stats);
+      setCounty(result.county || '');
+      setCity(result.city || '');
       
       addLog(`Loaded ${result.stats.total} realtors from CSV`, 'success');
       addLog(`${result.stats.hasComplete} already have contact info`, 'info');
@@ -117,40 +121,93 @@ function App() {
     }
   };
 
-  const startScraping = async () => {
+const startScraping = async () => {
+  if (needsScrapingData.length === 0) {
+    addLog('No realtors need scraping. All have contact info!', 'success');
+    return;
+  }
 
+  setProcessing(true);
+  setCompleted(false);
+  setLogs([]);
+  addLog(`Starting scraping process for ${needsScrapingData.length} realtors...`, 'info');
 
-    if (needsScrapingData.length === 0) {
-      addLog('No realtors need scraping. All have contact info!', 'success');
-      return;
+  // Create a working copy that we'll update
+  const updatedAllData = [...allData];
+
+  for (let i = 0; i < needsScrapingData.length; i++) {
+    const realtor = needsScrapingData[i];
+    addLog(`Searching: ${realtor.firstName} ${realtor.lastName}`, 'info');
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/scrape-realtor`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          realtor: {
+            firstName: realtor.firstName,
+            lastName: realtor.lastName,
+            company: realtor.company,
+            companyAddress: realtor.companyAddress,
+            primaryZip: realtor.primaryZip,
+            primaryCity: realtor.primaryCity,
+            primaryStateCode: realtor.primaryStateCode,
+            tags: realtor.tags
+          }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Scraping failed');
+      }
+
+      const result = await response.json();
+
+      // Find and update in the working copy
+      const allIndex = updatedAllData.findIndex(r => 
+        r.firstName === realtor.firstName && 
+        r.lastName === realtor.lastName && 
+        r.company === realtor.company
+      );
+      
+      if (allIndex !== -1) {
+        updatedAllData[allIndex] = result;
+      }
+
+      if (result.email || result.phone) {
+        addLog(`Found: ${result.email || result.phone} (${result.confidence}% confidence)`, 'success');
+      } else {
+        addLog(`No contact info found for ${realtor.firstName} ${realtor.lastName}`, 'warning');
+      }
+    } catch (error) {
+      addLog(`Error processing ${realtor.firstName} ${realtor.lastName}: ${error.message}`, 'error');
     }
+    
+    setProgress(((i + 1) / needsScrapingData.length) * 100);
+  }
 
-    setProcessing(true);
-    setCompleted(false);
-    setLogs([]);
-    addLog(`Starting scraping process for ${needsScrapingData.length} realtors...`, 'info');
-
-    for (let i = 0; i < needsScrapingData.length; i++) {
-      await processRealtor(needsScrapingData[i], i);
-      setProgress(((i + 1) / needsScrapingData.length) * 100);
-    }
-
-    setProcessing(false);
-    setCompleted(true);
-    addLog('Scraping completed!', 'success');
-  };
-
-const downloadCSV = () => {
-  const headers = ['First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Source', 'Confidence', 'Company Address', 'Primary Zip', 'Primary City', 'Primary State Code', 'Tags'];
+  // NOW update state with final data
+  setAllData(updatedAllData);
   
-  const rows = allData.map(r => [
+  setProcessing(false);
+  setCompleted(true);
+  addLog('Scraping completed!', 'success');
+
+  // Trigger n8n with the fully updated data
+  await triggerN8nUpload(updatedAllData);
+};
+
+const triggerN8nUpload = async (finalData) => {
+  const headers = ['First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Company Address', 'Primary Zip', 'Primary City', 'Primary State Code', 'Tags'];
+  
+  const rows = finalData.map(r => [
     r.firstName || '', 
     r.lastName || '', 
     r.company || '', 
     r.email || '', 
     r.phone || '',  
-    r.source || '',
-    r.confidence || '',
     r.companyAddress || '',
     r.primaryZip || '',
     r.primaryCity || '',
@@ -165,15 +222,86 @@ const downloadCSV = () => {
     }).join(','))
     .join('\n');
 
+  let filename = 'realtors_with_contacts.csv';
+  if (county) {
+    filename = `${county}_County_realtors_with_contacts.csv`;
+  }
+
+  const stateCode = finalData[0]?.primaryStateCode;
+  if (stateCode) {
+    addLog('Uploading to Google Drive and GoHighLevel...', 'info');
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/trigger-upload`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          csvContent: csv,
+          filename: filename,
+          stateCode: stateCode,  
+          county: county,
+          totalRealtors: finalData.length 
+        })
+      });
+
+      const result = await response.json();
+      
+      if (response.ok && result.success) {
+        addLog('✓ Successfully uploaded to Google Drive!', 'success');
+        addLog(`✓ Processing ${finalData.length} contacts for GoHighLevel...`, 'success');
+      } else {
+        throw new Error(result.error || result.details || 'Upload failed');
+      }
+    } catch (error) {
+      addLog(`Upload error: ${error.message}`, 'error');
+      addLog('Check server console for details', 'warning');
+      addLog('You can still download the CSV manually', 'info');
+    }
+  }
+};
+
+const downloadCSV = () => {
+  const headers = ['First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Company Address', 'Primary Zip', 'Primary City', 'Primary State Code', 'Tags'];
+  
+  const rows = allData.map(r => [
+    r.firstName || '', 
+    r.lastName || '', 
+    r.company || '', 
+    r.email || '', 
+    r.phone || '',  
+    r.companyAddress || '',
+    r.primaryZip || '',
+    r.primaryCity || '',
+    r.primaryStateCode || '',
+    r.tags || ''
+  ]);
+
+  const csv = [headers, ...rows]
+    .map(row => row.map(cell => {
+      const cellStr = String(cell || '').replace(/"/g, '""');
+      return `"${cellStr}"`;
+    }).join(','))
+    .join('\n');
+
+  // Generate filename
+  let filename = 'realtors_with_contacts.csv';
+  if (county) {
+    filename = `${county}_County_realtors_with_contacts.csv`;
+  }
+
+  // Download locally
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = window.URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'realtors_with_contacts.csv';
+  a.download = filename;
   a.click();
   window.URL.revokeObjectURL(url);
+  
+  addLog('CSV downloaded successfully', 'success');
 };
-
 
   return (
     <div className="min-h-screen ">
