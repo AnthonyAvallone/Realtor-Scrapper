@@ -1,11 +1,8 @@
 import React, { useState } from 'react';
 import './App.css'
-import RealtorScraper from './RealtorScraper';
-import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
 import { Upload, Download, Search, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 
 function App() {
-
   const [file, setFile] = useState(null);
   const [allData, setAllData] = useState([]);
   const [needsScrapingData, setNeedsScrapingData] = useState([]);
@@ -17,8 +14,8 @@ function App() {
   const [county, setCounty] = useState('');
   const [city, setCity] = useState('');
 
-  // const API_BASE_URL = 'http://localhost:3001/api';
-  const API_BASE_URL = 'http://167.71.81.58/api/realtors/';
+  const API_BASE_URL = 'http://localhost:3001/api';
+  // const API_BASE_URL = 'http://167.71.81.58/api/realtors/';
 
   const addLog = (message, type = 'info') => {
     setLogs(prev => [...prev, { message, type, time: new Date().toLocaleTimeString() }]);
@@ -31,7 +28,6 @@ function App() {
     setFile(uploadedFile);
     addLog('Parsing CSV file...', 'info');
     
-    // Parse CSV via backend
     const formData = new FormData();
     formData.append('file', uploadedFile);
 
@@ -61,247 +57,271 @@ function App() {
     }
   };
 
-  const processRealtor = async (realtor, index) => {
-    addLog(`Searching: ${realtor.firstName} ${realtor.lastName}`, 'info');
+  const startScraping = async () => {
+    if (needsScrapingData.length === 0) {
+      addLog('No realtors need scraping. All have contact info!', 'success');
+      return;
+    }
 
-    try {
-      const response = await fetch(`${API_BASE_URL}/scrape-realtor`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          realtor: {
-            firstName: realtor.firstName,
-            lastName: realtor.lastName,
-            company: realtor.company,
-            companyAddress: realtor.companyAddress,
-            primaryZip: realtor.primaryZip,
-            primaryCity: realtor.primaryCity,
-            primaryStateCode: realtor.primaryStateCode,
-            tags: realtor.tags
-          }
-        })
-      });
+    setProcessing(true);
+    setCompleted(false);
+    setLogs([]);
+    addLog(`Starting scraping process for ${needsScrapingData.length} realtors...`, 'info');
 
-      if (!response.ok) {
-        throw new Error('Scraping failed');
-      }
+    const updatedAllData = [...allData];
 
-      const result = await response.json();
+    for (let i = 0; i < needsScrapingData.length; i++) {
+      const realtor = needsScrapingData[i];
+      addLog(`Searching: ${realtor.firstName} ${realtor.lastName}`, 'info');
 
-      // Update only the needsScraping data
-      setNeedsScrapingData(prev => {
-        const updated = [...prev];
-        updated[index] = result;
-        return updated;
-      });
-      
-      // Also update in allData
-      setAllData(prev => {
-        const updated = [...prev];
-        const allIndex = updated.findIndex(r => 
+      try {
+        const response = await fetch(`${API_BASE_URL}/scrape-realtor`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            realtor: {
+              firstName: realtor.firstName,
+              lastName: realtor.lastName,
+              company: realtor.company,
+              companyAddress: realtor.companyAddress,
+              primaryZip: realtor.primaryZip,
+              primaryCity: realtor.primaryCity,
+              primaryStateCode: realtor.primaryStateCode,
+              buysides_last_12_months: realtor.buysides_last_12_months,
+              tags: realtor.tags
+            }
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error('Scraping failed');
+        }
+
+        const result = await response.json();
+
+        const allIndex = updatedAllData.findIndex(r => 
           r.firstName === realtor.firstName && 
           r.lastName === realtor.lastName && 
           r.company === realtor.company
         );
+        
         if (allIndex !== -1) {
-          updated[allIndex] = result;
+          updatedAllData[allIndex] = result;
         }
-        return updated;
-      });
 
-      if (result.email || result.phone) {
-        addLog(`Found: ${result.email || result.phone} (${result.confidence}% confidence)`, 'success');
-      } else {
-        addLog(`No contact info found for ${realtor.firstName} ${realtor.lastName}`, 'warning');
+        if (result.email || result.phone) {
+          addLog(`Found: ${result.email || result.phone} (${result.confidence}% confidence)`, 'success');
+        } else {
+          addLog(`No contact info found for ${realtor.firstName} ${realtor.lastName}`, 'warning');
+        }
+      } catch (error) {
+        addLog(`Error processing ${realtor.firstName} ${realtor.lastName}: ${error.message}`, 'error');
       }
+      
+      setProgress(((i + 1) / needsScrapingData.length) * 100);
+    }
+
+    setAllData(updatedAllData);
+    
+    addLog('Scraping completed! Starting filtering and DNC check...', 'success');
+    
+    // Process realtors for filtering and DNC check
+    await processRealtorsForFiltering(updatedAllData);
+  };
+
+  const processRealtorsForFiltering = async (realtorsData) => {
+    try {
+      addLog('Starting production filtering and DNC check...', 'info');
+      
+      const processedRealtors = [...realtorsData];
+      
+      // Process each realtor one by one to show progress
+      for (let i = 0; i < realtorsData.length; i++) {
+        try {
+          const response = await fetch(`${API_BASE_URL}/process-realtors`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              realtors: realtorsData,
+              index: i
+            })
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+            throw new Error(errorData.error || `HTTP ${response.status}`);
+          }
+
+          const result = await response.json();
+          
+          // Update the realtor in our array
+          processedRealtors[i] = result.realtor;
+          
+          // Log the progress message from backend
+          if (result.logMessage) {
+            addLog(result.logMessage, result.logType || 'info');
+          }
+          
+          // Update progress
+          setProgress(((i + 1) / realtorsData.length) * 100);
+        } catch (error) {
+          // Log the error but continue processing
+          addLog(`Error processing ${realtorsData[i]?.firstName} ${realtorsData[i]?.lastName}: ${error.message}`, 'error');
+          // Keep the original realtor data if processing fails
+          processedRealtors[i] = realtorsData[i];
+        }
+      }
+      
+      setAllData(processedRealtors);
+      
+      const lowProdCount = processedRealtors.filter(r => r.tags?.includes('low production')).length;
+      const dncCount = processedRealtors.filter(r => r.tags?.includes('dnc')).length;
+      
+      addLog(`Filtering complete! ${lowProdCount} low production, ${dncCount} on DNC`, 'success');
+      
+      setProcessing(false);
+      setCompleted(true);
+      
+      // Trigger n8n with the fully processed data
+      await triggerN8nUpload(processedRealtors);
     } catch (error) {
-      addLog(`Error processing ${realtor.firstName} ${realtor.lastName}: ${error.message}`, 'error');
+      addLog(`Error processing realtors: ${error.message}`, 'error');
+      setProcessing(false);
+      setCompleted(true); // Still mark as completed so user can download what was processed
     }
   };
 
-const startScraping = async () => {
-  if (needsScrapingData.length === 0) {
-    addLog('No realtors need scraping. All have contact info!', 'success');
-    return;
-  }
-
-  setProcessing(true);
-  setCompleted(false);
-  setLogs([]);
-  addLog(`Starting scraping process for ${needsScrapingData.length} realtors...`, 'info');
-
-  // Create a working copy that we'll update
-  const updatedAllData = [...allData];
-
-  for (let i = 0; i < needsScrapingData.length; i++) {
-    const realtor = needsScrapingData[i];
-    addLog(`Searching: ${realtor.firstName} ${realtor.lastName}`, 'info');
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/scrape-realtor`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          realtor: {
-            firstName: realtor.firstName,
-            lastName: realtor.lastName,
-            company: realtor.company,
-            companyAddress: realtor.companyAddress,
-            primaryZip: realtor.primaryZip,
-            primaryCity: realtor.primaryCity,
-            primaryStateCode: realtor.primaryStateCode,
-            tags: realtor.tags
-          }
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Scraping failed');
-      }
-
-      const result = await response.json();
-
-      // Find and update in the working copy
-      const allIndex = updatedAllData.findIndex(r => 
-        r.firstName === realtor.firstName && 
-        r.lastName === realtor.lastName && 
-        r.company === realtor.company
-      );
-      
-      if (allIndex !== -1) {
-        updatedAllData[allIndex] = result;
-      }
-
-      if (result.email || result.phone) {
-        addLog(`Found: ${result.email || result.phone} (${result.confidence}% confidence)`, 'success');
-      } else {
-        addLog(`No contact info found for ${realtor.firstName} ${realtor.lastName}`, 'warning');
-      }
-    } catch (error) {
-      addLog(`Error processing ${realtor.firstName} ${realtor.lastName}: ${error.message}`, 'error');
-    }
+  const triggerN8nUpload = async (finalData) => {
+    const headers = [
+      'First Name', 
+      'Last Name', 
+      'Company', 
+      'Email', 
+      'Phone', 
+      'Company Address', 
+      'Primary Zip', 
+      'Primary City', 
+      'Primary State Code', 
+      'Buysides Last 12 Months',
+      'Tags'
+    ];
     
-    setProgress(((i + 1) / needsScrapingData.length) * 100);
-  }
+    const rows = finalData.map(r => [
+      r.firstName || '', 
+      r.lastName || '', 
+      r.company || '', 
+      r.email || '', 
+      r.phone || '',  
+      r.companyAddress || '',
+      r.primaryZip || '',
+      r.primaryCity || '',
+      r.primaryStateCode || '',
+      r.buysides_last_12_months || '',
+      r.tags || ''
+    ]);
 
-  // NOW update state with final data
-  setAllData(updatedAllData);
-  
-  setProcessing(false);
-  setCompleted(true);
-  addLog('Scraping completed!', 'success');
+    const csv = [headers, ...rows]
+      .map(row => row.map(cell => {
+        const cellStr = String(cell || '').replace(/"/g, '""');
+        return `"${cellStr}"`;
+      }).join(','))
+      .join('\n');
 
-  // Trigger n8n with the fully updated data
-  await triggerN8nUpload(updatedAllData);
-};
-
-const triggerN8nUpload = async (finalData) => {
-  const headers = ['First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Company Address', 'Primary Zip', 'Primary City', 'Primary State Code', 'Tags'];
-  
-  const rows = finalData.map(r => [
-    r.firstName || '', 
-    r.lastName || '', 
-    r.company || '', 
-    r.email || '', 
-    r.phone || '',  
-    r.companyAddress || '',
-    r.primaryZip || '',
-    r.primaryCity || '',
-    r.primaryStateCode || '',
-    r.tags || ''
-  ]);
-
-  const csv = [headers, ...rows]
-    .map(row => row.map(cell => {
-      const cellStr = String(cell || '').replace(/"/g, '""');
-      return `"${cellStr}"`;
-    }).join(','))
-    .join('\n');
-
-  let filename = 'realtors_with_contacts.csv';
-  if (county) {
-    filename = `${county}_County_realtors_with_contacts.csv`;
-  }
-
-  const stateCode = finalData[0]?.primaryStateCode;
-  if (stateCode) {
-    addLog('Uploading to Google Drive and GoHighLevel...', 'info');
-    
-    try {
-      const response = await fetch(`${API_BASE_URL}/trigger-upload`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          csvContent: csv,
-          filename: filename,
-          stateCode: stateCode,  
-          county: county,
-          totalRealtors: finalData.length 
-        })
-      });
-
-      const result = await response.json();
-      
-      if (response.ok && result.success) {
-        addLog('✓ Successfully uploaded to Google Drive!', 'success');
-        addLog(`✓ Processing ${finalData.length} contacts for GoHighLevel...`, 'success');
-      } else {
-        throw new Error(result.error || result.details || 'Upload failed');
-      }
-    } catch (error) {
-      addLog(`Upload error: ${error.message}`, 'error');
-      addLog('Check server console for details', 'warning');
-      addLog('You can still download the CSV manually', 'info');
+    let filename = 'realtors_with_contacts.csv';
+    if (county) {
+      filename = `${county}_County_realtors_with_contacts.csv`;
     }
-  }
-};
 
-const downloadCSV = () => {
-  const headers = ['First Name', 'Last Name', 'Company', 'Email', 'Phone', 'Company Address', 'Primary Zip', 'Primary City', 'Primary State Code', 'Tags'];
-  
-  const rows = allData.map(r => [
-    r.firstName || '', 
-    r.lastName || '', 
-    r.company || '', 
-    r.email || '', 
-    r.phone || '',  
-    r.companyAddress || '',
-    r.primaryZip || '',
-    r.primaryCity || '',
-    r.primaryStateCode || '',
-    r.tags || ''
-  ]);
+    const stateCode = finalData[0]?.primaryStateCode;
+    if (stateCode) {
+      addLog('Uploading to Google Drive and GoHighLevel...', 'info');
+      
+      try {
+        const response = await fetch(`${API_BASE_URL}/trigger-upload`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            csvContent: csv,
+            filename: filename,
+            stateCode: stateCode,  
+            county: county,
+            totalRealtors: finalData.length 
+          })
+        });
 
-  const csv = [headers, ...rows]
-    .map(row => row.map(cell => {
-      const cellStr = String(cell || '').replace(/"/g, '""');
-      return `"${cellStr}"`;
-    }).join(','))
-    .join('\n');
+        const result = await response.json();
+        
+        if (response.ok && result.success) {
+          addLog('✓ Successfully uploaded to Google Drive!', 'success');
+          addLog(`✓ Processing ${finalData.length} contacts for GoHighLevel...`, 'success');
+        } else {
+          throw new Error(result.error || result.details || 'Upload failed');
+        }
+      } catch (error) {
+        addLog(`Upload error: ${error.message}`, 'error');
+        addLog('Check server console for details', 'warning');
+        addLog('You can still download the CSV manually', 'info');
+      }
+    }
+  };
 
-  // Generate filename
-  let filename = 'realtors_with_contacts.csv';
-  if (county) {
-    filename = `${county}_County_realtors_with_contacts.csv`;
-  }
+  const downloadCSV = () => {
+    const headers = [
+      'First Name', 
+      'Last Name', 
+      'Company', 
+      'Email', 
+      'Phone', 
+      'Company Address', 
+      'Primary Zip', 
+      'Primary City', 
+      'Primary State Code', 
+      'Buysides Last 12 Months',
+      'Tags'
+    ];
+    
+    const rows = allData.map(r => [
+      r.firstName || '', 
+      r.lastName || '', 
+      r.company || '', 
+      r.email || '', 
+      r.phone || '',  
+      r.companyAddress || '',
+      r.primaryZip || '',
+      r.primaryCity || '',
+      r.primaryStateCode || '',
+      r.buysides_last_12_months || '',
+      r.tags || ''
+    ]);
 
-  // Download locally
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  window.URL.revokeObjectURL(url);
-  
-  addLog('CSV downloaded successfully', 'success');
-};
+    const csv = [headers, ...rows]
+      .map(row => row.map(cell => {
+        const cellStr = String(cell || '').replace(/"/g, '""');
+        return `"${cellStr}"`;
+      }).join(','))
+      .join('\n');
+
+    let filename = 'realtors_with_contacts.csv';
+    if (county) {
+      filename = `${county}_County_realtors_with_contacts.csv`;
+    }
+
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    window.URL.revokeObjectURL(url);
+    
+    addLog('CSV downloaded successfully', 'success');
+  };
 
   return (
     <div className="min-h-screen ">
@@ -310,23 +330,6 @@ const downloadCSV = () => {
           <div className="flex items-center gap-3 mb-8 mx-auto">
             <h1 className="text-2xl font-bold text-gray-900">Realtor Contact Scraper</h1>
           </div>
-
-          {/* API Key Input */}
-          {/* <div className="mb-6">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              SerpAPI Key
-            </label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="Enter your SerpAPI key"
-              className="w-full px-4 py-2 border border-gray-300  focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              Get your API key from <a href="https://serpapi.com/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">SerpAPI</a>
-            </p>
-          </div> */}
 
           {/* File Upload */}
           <div className="mb-6">
@@ -345,7 +348,7 @@ const downloadCSV = () => {
                 <p className="text-gray-600">
                   {file ? file.name : 'Click to upload CSV file'}
                 </p>
-                <p className="text-sm text-gray-400 mt-2">CSV must contain first_name, last_name and company columns</p>
+                <p className="text-sm text-gray-400 mt-2">CSV must contain first_name, last_name, company, and buysides_last_12_months columns</p>
               </label>
             </div>
           </div>
@@ -358,10 +361,6 @@ const downloadCSV = () => {
                   <div className="text-2xl font-bold text-blue-600">{stats.total}</div>
                   <div className="text-sm text-blue-800">Total Realtors</div>
                 </div>
-                {/* <div className="bg-green-200   p-4">
-                  <div className="text-2xl font-bold text-green-600">{stats.hasComplete}</div>
-                  <div className="text-sm text-green-800">Have Contact Info</div>
-                </div> */}
                 <div className="bg-orange-100  p-4">
                   <div className="text-2xl font-bold text-orange-600">{stats.needsScraping}</div>
                   <div className="text-sm text-orange-800">Need Scraping</div>
@@ -423,7 +422,6 @@ const downloadCSV = () => {
                 onClick={downloadCSV}
                 className="flex-1 bg-green-600 text-white px-6 py-3 rounded-full font-semibold hover:bg-green-700 transition flex items-center justify-center gap-2"
               >
-                
                 Download Results
               </button>
             )}
@@ -448,14 +446,11 @@ const downloadCSV = () => {
           {logs.length > 0 && (
             <div className="bg-gray-900  p-4 max-h-96 overflow-y-auto">
               <h3 className="text-white font-semibold mb-3 flex items-center gap-2">
-                
                 Activity Log
               </h3>
               {logs.map((log, i) => (
                 <div key={i} className="flex items-start gap-2 mb-2 text-sm">
                   <span className="text-gray-500">[{log.time}]</span>
-                  {log.type === 'success' }
-                  {log.type === 'error' }
                   <span className={`
                     ${log.type === 'success' ? 'text-green-400' : ''}
                     ${log.type === 'error' ? 'text-red-400' : ''}
@@ -472,7 +467,7 @@ const downloadCSV = () => {
           {/* Results Summary */}
           {completed && (
             <div className="mt-6 bg-green-100   p-4">
-              <h3 className="font-semibold text-green-800 mb-2">Scraping Complete!</h3>
+              <h3 className="font-semibold text-green-800 mb-2">Processing Complete!</h3>
               <div className="text-sm text-green-700">
                 <p>Processed {needsScrapingData.length} realtors</p>
                 <p className="mt-1">
@@ -482,28 +477,14 @@ const downloadCSV = () => {
                 <p className="mt-2 text-xs">
                   Total in CSV: {allData.filter(r => r.email).length} emails, {allData.filter(r => r.phone).length} phones
                 </p>
+                <p className="mt-2 text-xs">
+                  Low Production: {allData.filter(r => r.tags?.includes('low production')).length} | 
+                  DNC List: {allData.filter(r => r.tags?.includes('dnc')).length}
+                </p>
               </div>
             </div>
           )}
         </div>
-
-        {/* Instructions */}
-        {/* <div className="mt-6 bg-white  shadow-lg p-6">
-          <h3 className="font-semibold text-gray-800 mb-3">How to Use</h3>
-          <ol className="list-decimal list-inside space-y-2 text-sm text-gray-600">
-            <li>Get a SerpAPI key from serpapi.com</li>
-            <li>Prepare a CSV file with "Name" and "Company" columns</li>
-            <li>Enter your API key and upload the CSV file</li>
-            <li>Click "Start Scraping" to begin the automated search</li>
-            <li>Download the results CSV with email and phone information</li>
-          </ol>
-          <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded">
-            <p className="text-xs text-yellow-800">
-              <strong>Note:</strong> Make sure the Node.js backend is running on port 3001. 
-              This tool respects robots.txt and only scrapes from allowed domains.
-            </p>
-          </div>
-        </div> */}
       </div>
     </div>
   );

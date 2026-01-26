@@ -14,9 +14,11 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); 
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// API key 
+// API keys
 const SERPAPI_KEY = process.env.SERPAPI_KEY; 
-// const SERPAPI_KEY ='2bd6055e24b0ab4236ba466cdad4a5db0a9cd545b5ac954cd4e7b982aefc5e6c';
+
+const RPV_API_TOKEN = process.env.RPV_API_TOKEN; 
+
 const N8N_WEBHOOK_URL = 'https://n8n.profitwithanthonyavallone.com/webhook/upload-realtors'
 
 // Regex patterns
@@ -50,8 +52,6 @@ function extractCountyFromFilename(filename) {
   if (!filename) return '';
   
   const nameWithoutExt = filename.replace(/\.[^/.]+$/, '');
-
-
   const countyMatch = nameWithoutExt.match(/([A-Za-z\s]+)\s*county/i);
   
   if (countyMatch && countyMatch[1]) {
@@ -77,6 +77,74 @@ function calculateConfidence(email, phone, source) {
   return Math.min(score, 100);
 }
 
+// Check DNC status using RealPhoneValidator API
+async function checkDNCStatus(phone) {
+  if (!phone || !RPV_API_TOKEN) {
+    return { isDNC: false, error: 'Missing phone or API token' };
+  }
+
+  const cleanPhone = cleanPhoneNumber(phone);
+  
+  if (cleanPhone.length !== 10) {
+    return { isDNC: false, error: 'Invalid phone number length' };
+  }
+
+  try {
+    const response = await axios.get('https://api.realvalidation.com/rpvWebService/DNCLookup.php', {
+      params: {
+        phone: cleanPhone,
+        token: RPV_API_TOKEN,
+        Output: 'json'
+      },
+      timeout: 10000
+    });
+
+    const data = response.data;
+    
+    console.log(`API Response for ${cleanPhone}:`, JSON.stringify(data));
+    
+    // Check for API error response
+    if (data.RESPONSECODE === '-1') {
+      return { 
+        isDNC: false, 
+        error: data.RESPONSEMSG || 'API returned error' 
+      };
+    }
+    
+    // Check for successful response
+    if (data.RESPONSECODE === 'OK') {
+      // Check if national_dnc is 'Y' (on DNC list)
+      if (data.national_dnc === 'Y') {
+        return {
+          isDNC: true,
+          nationalDNC: true,
+          stateDNC: data.state_dnc === 'Y',
+          isCell: data.iscell === 'Y',
+          isLitigator: data.litigator === 'Y',
+          id: data.id || ''
+        };
+      }
+      
+      // national_dnc is 'N' (not on DNC list)
+      if (data.national_dnc === 'N') {
+        return {
+          isDNC: false,
+          nationalDNC: false,
+          stateDNC: data.state_dnc === 'Y',
+          isCell: data.iscell === 'Y',
+          isLitigator: data.litigator === 'Y',
+          id: data.id || ''
+        };
+      }
+    }
+    
+    // Unexpected response format
+    return { isDNC: false, error: 'Unexpected API response format' };
+  } catch (error) {
+    console.error('DNC check error:', error.message);
+    return { isDNC: false, error: error.message };
+  }
+}
 
 async function searchSerpApiEnhanced(query, apiKey) {
   try {
@@ -105,7 +173,6 @@ async function searchSerpApiEnhanced(query, apiKey) {
       }
     }
     
-
     if (data.knowledge_graph) {
       const kg = data.knowledge_graph;
       let kgText = [
@@ -125,7 +192,6 @@ async function searchSerpApiEnhanced(query, apiKey) {
       });
     }
     
-
     if (data.local_results && data.local_results.places) {
       for (const place of data.local_results.places) {
         const placeText = [
@@ -144,7 +210,6 @@ async function searchSerpApiEnhanced(query, apiKey) {
       }
     }
     
-    // Extract from answer box
     if (data.answer_box) {
       const ab = data.answer_box;
       const abText = [
@@ -170,9 +235,7 @@ async function searchSerpApiEnhanced(query, apiKey) {
   }
 }
 
-// Try to scrape with fallback
 async function tryScrapeSafe(url) {
-  // Skip known blockers
   if (url.includes('linkedin.com') || 
       url.includes('zillow.com') || 
       url.includes('facebook.com')) {
@@ -200,16 +263,13 @@ async function tryScrapeSafe(url) {
     
     return extractContactInfo(text);
   } catch (error) {
-    // Silently fail - we'll rely on snippet data
     return null;
   }
 }
 
-// Main processing function - uses snippet data first, scraping as fallback
 async function processRealtor(realtorData, apiKey) {
   const { firstName, lastName, company } = realtorData;
   
-  // multiple search strategies
   const queries = [
     `${firstName} ${lastName} ${company} email phone contact`,
     `${firstName} ${lastName} ${company} email cell contact`,
@@ -225,11 +285,9 @@ async function processRealtor(realtorData, apiKey) {
   };
   
   try {
-    // Try each search query
     for (const query of queries) {
       const searchResults = await searchSerpApiEnhanced(query, apiKey);
       
-      // First pass: Extract from snippets (no scraping needed!)
       for (const result of searchResults) {
         const snippetContact = extractContactInfo(
           `${result.title} ${result.snippet}`
@@ -242,12 +300,10 @@ async function processRealtor(realtorData, apiKey) {
         }
       }
       
-      // If we found something, we can stop early
       if (allContacts.emails.length > 0 || allContacts.phones.length > 0) {
         break;
       }
       
-      // Second pass: Try scraping safe URLs only
       for (const result of searchResults.slice(0, 5)) {
         if (!result.url) continue;
         
@@ -259,20 +315,16 @@ async function processRealtor(realtorData, apiKey) {
           allContacts.sources.push(result.url);
         }
         
-        // Small delay between scrapes
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
       
-      // If we found something after scraping, stop
       if (allContacts.emails.length > 0 || allContacts.phones.length > 0) {
         break;
       }
       
-      // Delay between different queries
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
     
-    // Deduplicate and filter
     const uniqueEmails = [...new Set(allContacts.emails)];
     const uniquePhones = [...new Set(allContacts.phones)];
     
@@ -295,6 +347,7 @@ async function processRealtor(realtorData, apiKey) {
       primaryZip: realtorData.primaryZip || '',
       primaryCity: realtorData.primaryCity || '',
       primaryStateCode: realtorData.primaryStateCode || '',
+      buysides_last_12_months: realtorData.buysides_last_12_months || '',
       tags: realtorData.tags || ''
     };
   } catch (error) {
@@ -313,9 +366,9 @@ async function processRealtor(realtorData, apiKey) {
       primaryZip: realtorData.primaryZip || '',
       primaryCity: realtorData.primaryCity || '',
       primaryStateCode: realtorData.primaryStateCode || '',
+      buysides_last_12_months: realtorData.buysides_last_12_months || '',
       tags: realtorData.tags || ''
     };
-
   }
 }
 
@@ -330,7 +383,6 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
     const needsScraping = [];
     const buffer = req.file.buffer.toString('utf-8');
     
-    // Extract county from filename
     const countyFromFile = extractCountyFromFilename(req.file.originalname);
     console.log('Extracted county from filename:', countyFromFile);
     
@@ -355,12 +407,16 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
           const phoneKey = keys.find(k => 
             k.toLowerCase().includes('phone')
           );
+          const buysidesKey = keys.find(k =>
+            k.toLowerCase().replace(/[_\s]/g, '') === 'buysideslast12months'
+          );
           
           const firstName = (row[firstNameKey] || '').trim();
           const lastName = (row[lastNameKey] || '').trim();
           const company = (row[companyKey] || '').trim();
           const email = (row[emailKey] || '').trim();
           const phone = (row[phoneKey] || '').trim();
+          const buysides = row[buysidesKey] || '';
           const city = row.primary_city || '';
           const state = row.primary_state_code || '';
           const county = countyFromFile; 
@@ -382,6 +438,7 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
             primaryZip: row.primary_zip || '',
             primaryCity: row.primary_city || '',
             primaryStateCode: row.primary_state_code || '',
+            buysides_last_12_months: buysides,
             tags: generatedTags
           };
           
@@ -419,25 +476,19 @@ app.post('/api/parse-csv', upload.single('file'), async (req, res) => {
 
 app.post('/api/scrape-realtor', async (req, res) => {
   try {
-    console.log('Received scrape request:', req.body); 
-    
     const { realtor } = req.body;
 
     if (!SERPAPI_KEY) {
-      console.error('SERPAPI_KEY not found!'); 
       return res.status(500).json({ error: 'Server API key not configured' });
     }
 
     const apiKey = SERPAPI_KEY;
-    console.log('Using API key:', apiKey.substring(0, 10) + '...'); 
     
     if (!realtor) {
       return res.status(400).json({ error: 'Realtor data is required' });
     }
     
-    console.log('Processing realtor:', realtor); 
     const result = await processRealtor(realtor, apiKey);
-    console.log('Result:', result); 
     res.json(result);
   } catch (error) {
     console.error('Scrape endpoint error:', error); 
@@ -445,89 +496,104 @@ app.post('/api/scrape-realtor', async (req, res) => {
   }
 });
 
-app.post('/api/scrape-batch', upload.single('file'), async (req, res) => {
+// New endpoint to process and filter realtors (with streaming updates)
+app.post('/api/process-realtors', async (req, res) => {
   try {
-    if (!SERPAPI_KEY) {
-      return res.status(500).json({ error: 'Server API key not configured' });
+    const { realtors, index } = req.body;
+    
+    if (!realtors || !Array.isArray(realtors)) {
+      return res.status(400).json({ error: 'Realtors array is required' });
     }
 
-    const apiKey = SERPAPI_KEY;
+    // If index is provided, process single realtor (for progress updates)
+    if (index !== undefined) {
+      try {
+        const realtor = { ...realtors[index] };
+        const buysides = parseInt(realtor.buysides_last_12_months) || 0;
         
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-    
-    const allRealtors = [];
-    const buffer = req.file.buffer.toString('utf-8');
-    
-    await new Promise((resolve, reject) => {
-      Readable.from(buffer)
-        .pipe(csv({ trim: true, skip_empty_lines: true }))
-        .on('data', (row) => {
-          const keys = Object.keys(row);
+        let logMessage = '';
+        let logType = 'info';
+        
+        // Add "low production" tag if buysides < 2
+        if (buysides < 2) {
+          const currentTags = realtor.tags || '';
+          realtor.tags = currentTags ? `${currentTags},low production` : 'low production';
+          logMessage = `${realtor.firstName} ${realtor.lastName}: Added "low production" tag (buysides: ${buysides})`;
+          logType = 'warning';
+        }
+        
+        // Check DNC for realtors with 2+ buysides and valid phone
+        else if (buysides >= 2 && realtor.phone) {
+          logMessage = `Checking DNC for ${realtor.firstName} ${realtor.lastName} (${realtor.phone})...`;
+          logType = 'info';
           
-          const firstNameKey = keys.find(k => 
-            k.toLowerCase().replace(/[_\s]/g, '') === 'firstname'
-          );
-          const lastNameKey = keys.find(k => 
-            k.toLowerCase().replace(/[_\s]/g, '') === 'lastname'
-          );
-          const companyKey = keys.find(k => 
-            k.toLowerCase() === 'company'
-          );
-          const emailKey = keys.find(k => 
-            k.toLowerCase() === 'email'
-          );
-          const phoneKey = keys.find(k => 
-            k.toLowerCase().includes('phone')
-          );
+          const dncResult = await checkDNCStatus(realtor.phone);
           
-          const firstName = (row[firstNameKey] || '').trim();
-          const lastName = (row[lastNameKey] || '').trim();
-          const company = (row[companyKey] || '').trim();
-          const email = (row[emailKey] || '').trim();
-          const phone = (row[phoneKey] || '').trim();
+          console.log(`DNC Check Result for ${realtor.firstName} ${realtor.lastName}:`, dncResult);
           
-          allRealtors.push({
-            firstName,
-            lastName,
-            company,
-            email,
-            phone,
-            source: '',
-            confidence: 0,
-            needsScraping: !email || !phone
-          });
-        })
-        .on('end', resolve)
-        .on('error', reject);
-    });
-    
-    const results = [...allRealtors];
-    
-    for (let i = 0; i < results.length; i++) {
-      if (results[i].needsScraping) {
-        console.log(`Processing ${i + 1}/${results.length}: ${results[i].firstName} ${results[i].lastName}`);
+          if (dncResult.error) {
+            logMessage = `${realtor.firstName} ${realtor.lastName}: DNC check failed - ${dncResult.error}`;
+            logType = 'warning';
+          } else if (dncResult.isDNC === true) {
+            const currentTags = realtor.tags || '';
+            realtor.tags = currentTags ? `${currentTags},dnc` : 'dnc';
+            logMessage = `${realtor.firstName} ${realtor.lastName}: On DNC list`;
+            logType = 'error';
+          } else {
+            logMessage = `${realtor.firstName} ${realtor.lastName}: Clear - not on DNC`;
+            logType = 'success';
+          }
+        }
         
-        const scrapedData = await processRealtor(results[i], apiKey);
-        
-        results[i] = {
-          ...results[i],
-          email: scrapedData.email || results[i].email,
-          phone: scrapedData.phone || results[i].phone,
-          alternativeEmails: scrapedData.alternativeEmails || [],
-          alternativePhones: scrapedData.alternativePhones || [],
-          source: scrapedData.source || results[i].source,
-          confidence: scrapedData.confidence || 0
-        };
-        
-        // Delaying between processing each realtor
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        return res.json({ 
+          realtor, 
+          logMessage, 
+          logType,
+          index 
+        });
+      } catch (innerError) {
+        console.error(`Error processing realtor at index ${index}:`, innerError);
+        // Return the realtor unchanged if processing fails
+        return res.json({
+          realtor: realtors[index],
+          logMessage: `${realtors[index].firstName} ${realtors[index].lastName}: Processing error - ${innerError.message}`,
+          logType: 'error',
+          index
+        });
       }
     }
-    
-    res.json({ results });
+
+    // Batch processing (fallback)
+    console.log(`Processing ${realtors.length} realtors for filtering and DNC check...`);
+    const processedRealtors = [];
+
+    for (let i = 0; i < realtors.length; i++) {
+      const realtor = { ...realtors[i] };
+      const buysides = parseInt(realtor.buysides_last_12_months) || 0;
+      
+      if (buysides < 2) {
+        const currentTags = realtor.tags || '';
+        realtor.tags = currentTags ? `${currentTags},low production` : 'low production';
+      }
+      
+      if (buysides >= 2 && realtor.phone) {
+        const dncResult = await checkDNCStatus(realtor.phone);
+        
+        if (dncResult.isDNC === true) {
+          const currentTags = realtor.tags || '';
+          realtor.tags = currentTags ? `${currentTags},dnc` : 'dnc';
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+      processedRealtors.push(realtor);
+    }
+
+    console.log('Processing complete!');
+    res.json({ processedRealtors });
   } catch (error) {
+    console.error('Process realtors error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -549,7 +615,6 @@ app.post('/api/trigger-upload', async (req, res) => {
     console.log(`Total realtors: ${totalRealtors || 'unknown'}`);
     console.log(`CSV size: ${(csvContent.length / 1024).toFixed(2)} KB`);
     
-    // Send to n8n webhook - only send CSV, not realtors array
     const response = await axios.post(N8N_WEBHOOK_URL, {
       csvContent,
       filename,
@@ -562,9 +627,9 @@ app.post('/api/trigger-upload', async (req, res) => {
         'Content-Type': 'application/json',
         'Accept': 'application/json'
       },
-      timeout: 120000, // 2 minute timeout for large files
-      maxContentLength: 50 * 1024 * 1024, // 50MB
-      maxBodyLength: 50 * 1024 * 1024, // 50MB
+      timeout: 120000,
+      maxContentLength: 50 * 1024 * 1024,
+      maxBodyLength: 50 * 1024 * 1024,
       validateStatus: function (status) {
         return status >= 200 && status < 500;
       }
