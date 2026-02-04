@@ -14,12 +14,18 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); 
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// uuid
+const { v4: uuidv4 } = require('uuid');
+const jobs = {};
+
+
 // API keys
-const SERPAPI_KEY = process.env.SERPAPI_KEY; 
+// const SERPAPI_KEY = process.env.SERPAPI_KEY; 
 
-const RPV_API_TOKEN = process.env.RPV_API_TOKEN; 
+// const RPV_API_TOKEN = process.env.RPV_API_TOKEN; 
 
-const N8N_WEBHOOK_URL = 'https://n8n.profitwithanthonyavallone.com/webhook/upload-realtors'
+// const N8N_WEBHOOK_URL = 'https://n8n.profitwithanthonyavallone.com/webhook/upload-realtors'
+
 
 // Regex patterns
 const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
@@ -76,6 +82,8 @@ function calculateConfidence(email, phone, source) {
   }
   return Math.min(score, 100);
 }
+
+
 
 // Check DNC status using RealPhoneValidator API
 async function checkDNCStatus(phone) {
@@ -482,19 +490,38 @@ app.post('/api/scrape-realtor', async (req, res) => {
       return res.status(500).json({ error: 'Server API key not configured' });
     }
 
-    const apiKey = SERPAPI_KEY;
-    
     if (!realtor) {
       return res.status(400).json({ error: 'Realtor data is required' });
     }
-    
-    const result = await processRealtor(realtor, apiKey);
-    res.json(result);
+
+    const jobId = uuidv4();
+
+    jobs[jobId] = {
+      status: 'queued',
+      result: null,
+      error: null
+    };
+
+    res.json({ jobId });
+
+    // Background execution
+    (async () => {
+      try {
+        jobs[jobId].status = 'running';
+        const result = await processRealtor(realtor, SERPAPI_KEY);
+        jobs[jobId].status = 'completed';
+        jobs[jobId].result = result;
+      } catch (err) {
+        jobs[jobId].status = 'failed';
+        jobs[jobId].error = err.message;
+      }
+    })();
+
   } catch (error) {
-    console.error('Scrape endpoint error:', error); 
-    res.status(500).json({ error: error.message });
+    console.error('Scrape endpoint error:', error);
   }
 });
+
 
 // New endpoint to process and filter realtors (with streaming updates)
 app.post('/api/process-realtors', async (req, res) => {
@@ -596,6 +623,19 @@ app.post('/api/process-realtors', async (req, res) => {
     console.error('Process realtors error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+app.get('/api/job-status/:jobId', (req, res) => {
+  const job = jobs[req.params.jobId];
+
+  if (!job) {
+    return res.status(404).json({
+      status: 'missing',
+      error: 'Job not found'
+    });
+  }
+
+  res.json(job);
 });
 
 app.get('/api/health', (req, res) => {

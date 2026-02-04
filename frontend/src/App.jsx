@@ -57,6 +57,27 @@ function App() {
     }
   };
 
+  const waitForJob = async (jobId) => {
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+
+    let res;
+    try {
+      res = await fetch(`${API_BASE_URL}/job-status/${jobId}`);
+    } catch {
+      continue;
+    }
+
+    if (!res.ok) continue;
+
+    const job = await res.json();
+
+    if (job.status === 'completed') return job.result;
+    if (job.status === 'failed') throw new Error(job.error || 'Scraping failed');
+  }
+};
+
+
   const startScraping = async () => {
     if (needsScrapingData.length === 0) {
       addLog('No realtors need scraping. All have contact info!', 'success');
@@ -75,31 +96,21 @@ function App() {
       addLog(`Searching: ${realtor.firstName} ${realtor.lastName}`, 'info');
 
       try {
-        const response = await fetch(`${API_BASE_URL}/scrape-realtor`, {
+        const startRes = await fetch(`${API_BASE_URL}/scrape-realtor`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({
-            realtor: {
-              firstName: realtor.firstName,
-              lastName: realtor.lastName,
-              company: realtor.company,
-              companyAddress: realtor.companyAddress,
-              primaryZip: realtor.primaryZip,
-              primaryCity: realtor.primaryCity,
-              primaryStateCode: realtor.primaryStateCode,
-              buysides_last_12_months: realtor.buysides_last_12_months,
-              tags: realtor.tags
-            }
-          })
+          body: JSON.stringify({ realtor })
         });
 
-        if (!response.ok) {
-          throw new Error('Scraping failed');
+        if (!startRes.ok) {
+          const text = await startRes.text();
+          throw new Error(`Failed to start job: ${text}`);
         }
 
-        const result = await response.json();
+        const { jobId } = await startRes.json();
+        const result = await waitForJob(jobId);
 
         const allIndex = updatedAllData.findIndex(r => 
           r.firstName === realtor.firstName && 
